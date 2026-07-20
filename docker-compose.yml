@@ -2,8 +2,6 @@ services:
   lobby:
     build: .
     restart: unless-stopped
-    command:
-      - -http=:8080
-      - -relay-public=${PUBLIC_WS_URL:-wss://example.com/ws}
     ports:
-      - "127.0.0.1:8080:8080/tcp"
+      - "8080:8080/tcp"
+      - "27015:27015/udp"
