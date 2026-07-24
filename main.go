@@ -16,6 +16,8 @@ import (
 const (
 	protocolVersion = "2"
 	lobbyTTL        = 45 * time.Second
+	pendingPeerTTL  = 15 * time.Second
+	peerTTL         = 30 * time.Second
 	maxDatagram     = 1400
 
 	udpAuth       = byte(1)
@@ -57,11 +59,12 @@ type lobby struct {
 }
 
 type peer struct {
-	key      string
-	addr     *net.UDPAddr
-	peerID   uint16
-	lastSeen time.Time
-	p2p      bool
+	key           string
+	addr          *net.UDPAddr
+	peerID        uint16
+	lastSeen      time.Time
+	authenticated bool
+	p2p           bool
 }
 
 type udpSession struct {
@@ -125,17 +128,56 @@ func bearer(r *http.Request) string {
 func (s *store) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	now := time.Now()
 	for id, l := range s.lobbies {
-		if time.Since(l.UpdatedAt) <= lobbyTTL {
+		if now.Sub(l.UpdatedAt) > lobbyTTL {
+			s.deleteLobbyLocked(id)
 			continue
 		}
-		for endpoint, session := range s.endpoints {
-			if session.lobbyID == id {
-				delete(s.endpoints, endpoint)
+
+		for key, p := range l.peers {
+			ttl := pendingPeerTTL
+			if p.authenticated {
+				ttl = peerTTL
+			}
+			if now.Sub(p.lastSeen) > ttl {
+				s.deletePeerLocked(l, key)
 			}
 		}
-		delete(s.lobbies, id)
 	}
+}
+
+func (s *store) deletePeerLocked(l *lobby, key string) {
+	p, ok := l.peers[key]
+	if !ok {
+		return
+	}
+	if p.addr != nil {
+		delete(s.endpoints, p.addr.String())
+	}
+	delete(l.peers, key)
+}
+
+func (s *store) deleteLobbyLocked(id string) {
+	for endpoint, session := range s.endpoints {
+		if session.lobbyID == id {
+			delete(s.endpoints, endpoint)
+		}
+	}
+	delete(s.lobbies, id)
+}
+
+func lobbySnapshotLocked(l *lobby) lobby {
+	snapshot := *l
+	reserved := len(l.peers) + 1
+	if snapshot.Players < reserved {
+		snapshot.Players = reserved
+	}
+	if snapshot.Players > snapshot.MaxPlayers {
+		snapshot.Players = snapshot.MaxPlayers
+	}
+	return snapshot
 }
 
 func main() {
@@ -182,7 +224,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		list := make([]lobby, 0, len(s.lobbies))
 		for _, l := range s.lobbies {
-			list = append(list, *l)
+			list = append(list, lobbySnapshotLocked(l))
 		}
 		s.mu.Unlock()
 		writeJSON(w, 200, list)
@@ -204,7 +246,10 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.lobbies[l.ID] = l
 		s.mu.Unlock()
-		writeJSON(w, 201, map[string]any{"id": l.ID, "lobby": l, "hostRelayKey": l.HostKey, "hostPeerId": l.HostPeer, "relayAddress": s.relayAddress})
+		s.mu.Lock()
+		snapshot := lobbySnapshotLocked(l)
+		s.mu.Unlock()
+		writeJSON(w, 201, map[string]any{"id": l.ID, "lobby": snapshot, "hostRelayKey": l.HostKey, "hostPeerId": l.HostPeer, "relayAddress": s.relayAddress})
 	default:
 		fail(w, 405, "method not allowed")
 	}
@@ -234,8 +279,9 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		key := randomHex(16)
 		peerID := nextPeerID(l)
 		l.peers[key] = peer{key: key, peerID: peerID, lastSeen: time.Now()}
+		snapshot := lobbySnapshotLocked(l)
 		s.mu.Unlock()
-		writeJSON(w, 200, map[string]any{"id": l.ID, "lobby": l, "relayKey": key, "peerId": peerID, "relayAddress": s.relayAddress})
+		writeJSON(w, 200, map[string]any{"id": l.ID, "lobby": snapshot, "relayKey": key, "peerId": peerID, "relayAddress": s.relayAddress})
 		return
 	}
 	if bearer(r) != l.HostKey {
@@ -259,12 +305,7 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	case http.MethodDelete:
 		s.mu.Lock()
-		for endpoint, session := range s.endpoints {
-			if session.lobbyID == id {
-				delete(s.endpoints, endpoint)
-			}
-		}
-		delete(s.lobbies, id)
+		s.deleteLobbyLocked(id)
 		s.mu.Unlock()
 		w.WriteHeader(204)
 	default:
@@ -352,6 +393,7 @@ func (s *store) handleUDPAuth(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 			}
 			p.addr = cloneUDPAddr(addr)
 			p.lastSeen = time.Now()
+			p.authenticated = true
 			p.p2p = false
 			l.peers[key] = p
 		}
@@ -480,7 +522,6 @@ func candidatePacket(peerID uint16, addr *net.UDPAddr) []byte {
 }
 
 func (s *store) handleUDPData(conn *net.UDPConn, addr *net.UDPAddr, packet []byte) {
-	// magic + type + target id + transport fragment fields
 	if len(packet) < 5+2+4+2+2+4 {
 		return
 	}
@@ -514,7 +555,6 @@ func (s *store) handleUDPData(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 		return
 	}
 
-	// Replace target ID with actual sender ID. The rest is transport-fragment metadata and data.
 	forwarded := make([]byte, 5+2+len(packet)-7)
 	copy(forwarded[:4], udpMagic)
 	forwarded[4] = udpForwarded
