@@ -2,9 +2,56 @@ package main
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestJoinRejectsDuplicateNamesAndBannedIPs(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	const hostKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	s := &store{
+		lobbies: map[string]*lobby{id: {
+			ID: id, HostName: "Host", HostKey: hostKey, HostPeer: 1, MaxPlayers: 4,
+			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
+			usedPeerIDs: map[uint16]bool{1: true},
+		}},
+		endpoints: make(map[string]udpSession),
+	}
+
+	join := func(name, address string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/lobbies/"+id+"/join",
+			strings.NewReader(`{"playerName":"`+name+`"}`))
+		req.RemoteAddr = address
+		res := httptest.NewRecorder()
+		s.handleLobby(res, req)
+		return res
+	}
+
+	if res := join("Alice", "203.0.113.1:5000"); res.Code != http.StatusOK {
+		t.Fatalf("first join status = %d, want %d", res.Code, http.StatusOK)
+	}
+	if res := join("alice", "203.0.113.2:5001"); res.Code != http.StatusConflict {
+		t.Fatalf("duplicate name status = %d, want %d", res.Code, http.StatusConflict)
+	}
+
+	ban := httptest.NewRequest(http.MethodPost, "/v1/lobbies/"+id+"/ban",
+		strings.NewReader(`{"playerName":"Alice"}`))
+	ban.Header.Set("Authorization", "Bearer "+hostKey)
+	banRes := httptest.NewRecorder()
+	s.handleLobby(banRes, ban)
+	if banRes.Code != http.StatusOK {
+		t.Fatalf("ban status = %d, want %d", banRes.Code, http.StatusOK)
+	}
+	if res := join("AnotherName", "203.0.113.1:6000"); res.Code != http.StatusForbidden {
+		t.Fatalf("banned IP status = %d, want %d", res.Code, http.StatusForbidden)
+	}
+	if res := join("AnotherName", "203.0.113.3:6001"); res.Code != http.StatusOK {
+		t.Fatalf("different IP status = %d, want %d", res.Code, http.StatusOK)
+	}
+}
 
 func TestUDPRelayAuthenticatesAndRoutes(t *testing.T) {
 	const id = "0123456789abcdef0123456789abcdef"

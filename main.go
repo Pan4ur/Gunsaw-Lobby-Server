@@ -18,6 +18,8 @@ const (
 	lobbyTTL        = 45 * time.Second
 	pendingPeerTTL  = 15 * time.Second
 	peerTTL         = 30 * time.Second
+	defaultBanTTL   = time.Hour
+	maxBanTTL       = 24 * time.Hour
 	maxDatagram     = 1400
 
 	udpAuth       = byte(1)
@@ -47,6 +49,7 @@ type lobby struct {
 	AllowRespawn        bool         `json:"allowRespawn"`
 	RespawnTime         int          `json:"respawnTime"`
 	RespawnAtStart      bool         `json:"respawnAtStart"`
+	ConnectionMode      string       `json:"connectionMode"`
 	HostPort            int          `json:"hostPort"`
 	HostIP              string       `json:"hostIp"`
 	UpdatedAt           time.Time    `json:"-"`
@@ -54,6 +57,8 @@ type lobby struct {
 	HostPeer            uint16       `json:"-"`
 	HostAddr            *net.UDPAddr `json:"-"`
 	peers               map[string]peer
+	bannedIPs           map[string]time.Time
+	usedPeerIDs         map[uint16]bool
 	HostP2P             bool
 	P2PKey              []byte
 }
@@ -65,6 +70,8 @@ type peer struct {
 	lastSeen      time.Time
 	authenticated bool
 	p2p           bool
+	name          string
+	ip            string
 }
 
 type udpSession struct {
@@ -92,11 +99,21 @@ type createRequest struct {
 	AllowRespawn        bool   `json:"allowRespawn"`
 	RespawnTime         int    `json:"respawnTime"`
 	RespawnAtStart      bool   `json:"respawnAtStart"`
+	ConnectionMode      string `json:"connectionMode"`
 }
 
 type heartbeatRequest struct {
 	Players int    `json:"players"`
 	Map     string `json:"map"`
+}
+
+type joinRequest struct {
+	PlayerName string `json:"playerName"`
+}
+
+type banRequest struct {
+	PlayerName      string `json:"playerName"`
+	DurationMinutes int    `json:"durationMinutes"`
 }
 
 func randomHex(bytes int) string {
@@ -145,6 +162,11 @@ func (s *store) cleanup() {
 				s.deletePeerLocked(l, key)
 			}
 		}
+		for ip, expiresAt := range l.bannedIPs {
+			if !expiresAt.After(now) {
+				delete(l.bannedIPs, ip)
+			}
+		}
 	}
 }
 
@@ -178,6 +200,60 @@ func lobbySnapshotLocked(l *lobby) lobby {
 		snapshot.Players = snapshot.MaxPlayers
 	}
 	return snapshot
+}
+
+func normalizePlayerName(value string) string {
+	name := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
+	if name == "" {
+		return "Player"
+	}
+	runes := []rune(name)
+	if len(runes) > 32 {
+		return string(runes[:32])
+	}
+	return name
+}
+
+func requestIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
+func udpIP(addr *net.UDPAddr) string {
+	if addr == nil || addr.IP == nil {
+		return ""
+	}
+	return addr.IP.String()
+}
+
+func isBannedLocked(l *lobby, ip string, now time.Time) bool {
+	if ip == "" {
+		return false
+	}
+	expiresAt, banned := l.bannedIPs[ip]
+	if !banned {
+		return false
+	}
+	if !expiresAt.After(now) {
+		delete(l.bannedIPs, ip)
+		return false
+	}
+	return true
+}
+
+func playerNameTakenLocked(l *lobby, name string) bool {
+	if strings.EqualFold(l.HostName, name) {
+		return true
+	}
+	for _, p := range l.peers {
+		if strings.EqualFold(p.name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {
@@ -234,14 +310,21 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
+		connectionMode := "Relay"
+		if strings.EqualFold(in.ConnectionMode, "P2P") {
+			connectionMode = "P2P"
+		} else if strings.EqualFold(in.ConnectionMode, "Auto") {
+			connectionMode = "Auto"
+		}
 		l := &lobby{
-			ID: randomHex(16), Name: in.Name, HostName: in.HostName, Map: in.Map,
+			ID: randomHex(16), Name: in.Name, HostName: normalizePlayerName(in.HostName), Map: in.Map,
 			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
 			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime,
-			RespawnAtStart: in.RespawnAtStart, HostPort: in.HostPort,
+			RespawnAtStart: in.RespawnAtStart, ConnectionMode: connectionMode, HostPort: in.HostPort,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
-			peers: make(map[string]peer),
+			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
+			usedPeerIDs: map[uint16]bool{1: true},
 		}
 		s.mu.Lock()
 		s.lobbies[l.ID] = l
@@ -270,7 +353,24 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "join" && r.Method == http.MethodPost {
+		var in joinRequest
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(w, 400, "invalid join request")
+			return
+		}
+		playerName := normalizePlayerName(in.PlayerName)
+		ip := requestIP(r)
 		s.mu.Lock()
+		if isBannedLocked(l, ip, time.Now()) {
+			s.mu.Unlock()
+			fail(w, 403, "you are temporarily banned from this lobby")
+			return
+		}
+		if playerNameTakenLocked(l, playerName) {
+			s.mu.Unlock()
+			fail(w, 409, "a player with this name is already in the lobby")
+			return
+		}
 		if len(l.peers)+1 >= l.MaxPlayers {
 			s.mu.Unlock()
 			fail(w, 409, "lobby is full")
@@ -278,7 +378,16 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		}
 		key := randomHex(16)
 		peerID := nextPeerID(l)
-		l.peers[key] = peer{key: key, peerID: peerID, lastSeen: time.Now()}
+		if peerID == 0 {
+			s.mu.Unlock()
+			fail(w, 409, "lobby has no peer IDs available")
+			return
+		}
+		if l.usedPeerIDs == nil {
+			l.usedPeerIDs = map[uint16]bool{l.HostPeer: true}
+		}
+		l.peers[key] = peer{key: key, peerID: peerID, name: playerName, ip: ip, lastSeen: time.Now()}
+		l.usedPeerIDs[peerID] = true
 		snapshot := lobbySnapshotLocked(l)
 		s.mu.Unlock()
 		writeJSON(w, 200, map[string]any{"id": l.ID, "lobby": snapshot, "relayKey": key, "peerId": peerID, "relayAddress": s.relayAddress})
@@ -286,6 +395,50 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 	}
 	if bearer(r) != l.HostKey {
 		fail(w, 401, "host authorization required")
+		return
+	}
+	if len(parts) == 2 && parts[1] == "ban" && r.Method == http.MethodPost {
+		var in banRequest
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(w, 400, "invalid ban request")
+			return
+		}
+		playerName := normalizePlayerName(in.PlayerName)
+		if strings.EqualFold(l.HostName, playerName) {
+			fail(w, 400, "why u wanna ban yourself lol")
+			return
+		}
+		duration := defaultBanTTL
+		if in.DurationMinutes > 0 {
+			duration = time.Duration(in.DurationMinutes) * time.Minute
+		}
+		if duration > maxBanTTL {
+			duration = maxBanTTL
+		}
+		s.mu.Lock()
+		var target peer
+		found := false
+		for _, p := range l.peers {
+			if strings.EqualFold(p.name, playerName) {
+				target = p
+				found = true
+				break
+			}
+		}
+		if !found || target.ip == "" {
+			s.mu.Unlock()
+			fail(w, 404, "player not found")
+			return
+		}
+		expiresAt := time.Now().Add(duration)
+		if l.bannedIPs == nil {
+			l.bannedIPs = make(map[string]time.Time)
+		}
+		l.bannedIPs[target.ip] = expiresAt
+		s.deletePeerLocked(l, target.key)
+		s.mu.Unlock()
+		writeJSON(w, 200, map[string]any{"status": "banned", "peerId": target.peerID,
+			"expiresAt": expiresAt.UTC().Format(time.RFC3339)})
 		return
 	}
 	switch r.Method {
@@ -314,12 +467,14 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 }
 
 func nextPeerID(l *lobby) uint16 {
-	used := map[uint16]bool{l.HostPeer: true}
-	for _, p := range l.peers {
-		used[p.peerID] = true
+	if l.usedPeerIDs == nil {
+		l.usedPeerIDs = map[uint16]bool{l.HostPeer: true}
+		for _, p := range l.peers {
+			l.usedPeerIDs[p.peerID] = true
+		}
 	}
 	for id := uint16(2); id < 65535; id++ {
-		if !used[id] {
+		if !l.usedPeerIDs[id] {
 			return id
 		}
 	}
@@ -377,6 +532,7 @@ func (s *store) handleUDPAuth(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 	s.mu.Lock()
 	l := s.lobbies[id]
 	var peerID uint16
+	var failureMessage string
 	if l != nil && key == l.HostKey {
 		peerID = l.HostPeer
 		if l.HostAddr != nil {
@@ -386,12 +542,15 @@ func (s *store) handleUDPAuth(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 		l.HostP2P = false
 	} else if l != nil {
 		p, ok := l.peers[key]
-		if ok {
+		if isBannedLocked(l, udpIP(addr), time.Now()) {
+			failureMessage = "You are temporarily banned from this lobby."
+		} else if ok {
 			peerID = p.peerID
 			if p.addr != nil {
 				delete(s.endpoints, p.addr.String())
 			}
 			p.addr = cloneUDPAddr(addr)
+			p.ip = udpIP(addr)
 			p.lastSeen = time.Now()
 			p.authenticated = true
 			p.p2p = false
@@ -414,6 +573,8 @@ func (s *store) handleUDPAuth(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 	response := []byte{udpMagic[0], udpMagic[1], udpMagic[2], udpMagic[3], responseType, byte(peerID), byte(peerID >> 8)}
 	if responseType == udpAuthOK && len(p2pKey) == p2pKeySize {
 		response = append(response, p2pKey...)
+	} else if responseType == udpAuthFailed && failureMessage != "" {
+		response = append(response, []byte(failureMessage)...)
 	}
 	_, _ = conn.WriteToUDP(response, addr)
 }
