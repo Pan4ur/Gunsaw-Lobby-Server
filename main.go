@@ -14,13 +14,14 @@ import (
 )
 
 const (
-	protocolVersion = "2"
-	lobbyTTL        = 45 * time.Second
-	pendingPeerTTL  = 15 * time.Second
-	peerTTL         = 30 * time.Second
-	defaultBanTTL   = time.Hour
-	maxBanTTL       = 24 * time.Hour
-	maxDatagram     = 1400
+	protocolVersion  = "2"
+	legacyModVersion = "0.4.0"
+	lobbyTTL         = 45 * time.Second
+	pendingPeerTTL   = 15 * time.Second
+	peerTTL          = 30 * time.Second
+	defaultBanTTL    = time.Hour
+	maxBanTTL        = 24 * time.Hour
+	maxDatagram      = 1400
 
 	udpAuth       = byte(1)
 	udpAuthOK     = byte(2)
@@ -52,6 +53,7 @@ type lobby struct {
 	ConnectionMode      string       `json:"connectionMode"`
 	HostPort            int          `json:"hostPort"`
 	HostIP              string       `json:"hostIp"`
+	ModVersion          string       `json:"modVersion"`
 	UpdatedAt           time.Time    `json:"-"`
 	HostKey             string       `json:"-"`
 	HostPeer            uint16       `json:"-"`
@@ -100,6 +102,7 @@ type createRequest struct {
 	RespawnTime         int    `json:"respawnTime"`
 	RespawnAtStart      bool   `json:"respawnAtStart"`
 	ConnectionMode      string `json:"connectionMode"`
+	ModVersion          string `json:"modVersion"`
 }
 
 type heartbeatRequest struct {
@@ -109,6 +112,7 @@ type heartbeatRequest struct {
 
 type joinRequest struct {
 	PlayerName string `json:"playerName"`
+	ModVersion string `json:"modVersion"`
 }
 
 type banRequest struct {
@@ -214,6 +218,15 @@ func normalizePlayerName(value string) string {
 	return name
 }
 
+// normalizeModVersion keeps pre-versioned clients compatible with the last
+// version that did not send modVersion in lobby requests.
+func normalizeModVersion(value string) string {
+	if value == "" {
+		return legacyModVersion
+	}
+	return value
+}
+
 func requestIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -306,7 +319,12 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, list)
 	case http.MethodPost:
 		var in createRequest
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || in.MaxPlayers < 1 || in.MaxPlayers > 16 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 {
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(w, 400, "invalid lobby fields")
+			return
+		}
+		in.ModVersion = normalizeModVersion(in.ModVersion)
+		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || in.MaxPlayers < 1 || in.MaxPlayers > 16 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
@@ -321,7 +339,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
 			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime,
-			RespawnAtStart: in.RespawnAtStart, ConnectionMode: connectionMode, HostPort: in.HostPort,
+			RespawnAtStart: in.RespawnAtStart, ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
 			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
 			usedPeerIDs: map[uint16]bool{1: true},
@@ -358,9 +376,15 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "invalid join request")
 			return
 		}
+		in.ModVersion = normalizeModVersion(in.ModVersion)
 		playerName := normalizePlayerName(in.PlayerName)
 		ip := requestIP(r)
 		s.mu.Lock()
+		if in.ModVersion != l.ModVersion {
+			s.mu.Unlock()
+			fail(w, 426, "mod version does not match this lobby")
+			return
+		}
 		if isBannedLocked(l, ip, time.Now()) {
 			s.mu.Unlock()
 			fail(w, 403, "you are temporarily banned from this lobby")

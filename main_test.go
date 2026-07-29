@@ -14,7 +14,7 @@ func TestJoinRejectsDuplicateNamesAndBannedIPs(t *testing.T) {
 	const hostKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	s := &store{
 		lobbies: map[string]*lobby{id: {
-			ID: id, HostName: "Host", HostKey: hostKey, HostPeer: 1, MaxPlayers: 4,
+			ID: id, HostName: "Host", HostKey: hostKey, HostPeer: 1, MaxPlayers: 4, ModVersion: "0.4.0",
 			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
 			usedPeerIDs: map[uint16]bool{1: true},
 		}},
@@ -23,7 +23,7 @@ func TestJoinRejectsDuplicateNamesAndBannedIPs(t *testing.T) {
 
 	join := func(name, address string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/v1/lobbies/"+id+"/join",
-			strings.NewReader(`{"playerName":"`+name+`"}`))
+			strings.NewReader(`{"playerName":"`+name+`","modVersion":"0.4.0"}`))
 		req.RemoteAddr = address
 		res := httptest.NewRecorder()
 		s.handleLobby(res, req)
@@ -50,6 +50,57 @@ func TestJoinRejectsDuplicateNamesAndBannedIPs(t *testing.T) {
 	}
 	if res := join("AnotherName", "203.0.113.3:6001"); res.Code != http.StatusOK {
 		t.Fatalf("different IP status = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
+func TestJoinUsesLegacyVersionForMissingModVersion(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	s := &store{
+		lobbies: map[string]*lobby{id: {
+			ID: id, HostName: "Host", HostPeer: 1, MaxPlayers: 4, ModVersion: "0.4.0",
+			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
+			usedPeerIDs: map[uint16]bool{1: true},
+		}},
+		endpoints: make(map[string]udpSession),
+	}
+
+	join := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/lobbies/"+id+"/join", strings.NewReader(body))
+		res := httptest.NewRecorder()
+		s.handleLobby(res, req)
+		return res
+	}
+
+	if res := join(`{"playerName":"OldClient"}`); res.Code != http.StatusOK {
+		t.Fatalf("missing version status = %d, want %d", res.Code, http.StatusOK)
+	}
+	if res := join(`{"playerName":"DifferentClient","modVersion":"0.3.9"}`); res.Code != http.StatusUpgradeRequired {
+		t.Fatalf("different version status = %d, want %d", res.Code, http.StatusUpgradeRequired)
+	}
+	if res := join(`{"playerName":"CurrentClient","modVersion":"0.4.0"}`); res.Code != http.StatusOK {
+		t.Fatalf("matching version status = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
+func TestCreateUsesLegacyVersionForMissingModVersion(t *testing.T) {
+	s := &store{lobbies: make(map[string]*lobby), endpoints: make(map[string]udpSession)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/lobbies", strings.NewReader(`{
+		"name":"Legacy lobby", "hostName":"Host", "map":"Map", "maxPlayers":4,
+		"hostPort":7777, "respawnTime":0
+	}`))
+	res := httptest.NewRecorder()
+	s.handleLobbies(res, req)
+
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d", res.Code, http.StatusCreated)
+	}
+	if len(s.lobbies) != 1 {
+		t.Fatalf("lobbies = %d, want 1", len(s.lobbies))
+	}
+	for _, l := range s.lobbies {
+		if l.ModVersion != legacyModVersion {
+			t.Fatalf("mod version = %q, want %q", l.ModVersion, legacyModVersion)
+		}
 	}
 }
 
