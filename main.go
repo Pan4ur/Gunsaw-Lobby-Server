@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -463,6 +464,32 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		writeJSON(w, 200, map[string]any{"status": "banned", "peerId": target.peerID,
 			"expiresAt": expiresAt.UTC().Format(time.RFC3339)})
+		return
+	}
+	if len(parts) == 3 && parts[1] == "peers" && r.Method == http.MethodDelete {
+		peerID, err := strconv.ParseUint(parts[2], 10, 16)
+		if err != nil || uint16(peerID) == l.HostPeer {
+			fail(w, 400, "invalid peer id")
+			return
+		}
+		s.mu.Lock()
+		var targetKey string
+		for key, peer := range l.peers {
+			if peer.peerID == uint16(peerID) {
+				targetKey = key
+				break
+			}
+		}
+		if targetKey == "" {
+			s.mu.Unlock()
+			fail(w, 404, "peer not found")
+			return
+		}
+		s.deletePeerLocked(l, targetKey)
+		l.Players = len(l.peers) + 1
+		l.UpdatedAt = time.Now()
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	switch r.Method {
