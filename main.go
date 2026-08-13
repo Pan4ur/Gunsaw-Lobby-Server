@@ -51,6 +51,9 @@ type lobby struct {
 	AllowRespawn        bool         `json:"allowRespawn"`
 	RespawnTime         int          `json:"respawnTime"`
 	RespawnAtStart      bool         `json:"respawnAtStart"`
+	PlayerCollisions    bool         `json:"playerCollisions"`
+	Cheats              bool         `json:"cheats"`
+	AllowSwap           *bool        `json:"allowSwap"`
 	ConnectionMode      string       `json:"connectionMode"`
 	HostPort            int          `json:"hostPort"`
 	HostIP              string       `json:"hostIp"`
@@ -102,6 +105,9 @@ type createRequest struct {
 	AllowRespawn        bool   `json:"allowRespawn"`
 	RespawnTime         int    `json:"respawnTime"`
 	RespawnAtStart      bool   `json:"respawnAtStart"`
+	PlayerCollisions    *bool  `json:"playerCollisions"`
+	Cheats              bool   `json:"cheats"`
+	AllowSwap           *bool  `json:"allowSwap"`
 	ConnectionMode      string `json:"connectionMode"`
 	ModVersion          string `json:"modVersion"`
 }
@@ -340,10 +346,20 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
 			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime,
-			RespawnAtStart: in.RespawnAtStart, ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
+			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats,
+			ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
 			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
 			usedPeerIDs: map[uint16]bool{1: true},
+		}
+		if in.PlayerCollisions != nil {
+			l.PlayerCollisions = *in.PlayerCollisions
+		}
+		if in.AllowSwap != nil {
+			l.AllowSwap = in.AllowSwap
+		} else {
+			allowSwap := true
+			l.AllowSwap = &allowSwap
 		}
 		s.mu.Lock()
 		s.lobbies[l.ID] = l
