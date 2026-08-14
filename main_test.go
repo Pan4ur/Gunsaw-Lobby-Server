@@ -101,6 +101,33 @@ func TestCreateUsesLegacyVersionForMissingModVersion(t *testing.T) {
 		if l.ModVersion != legacyModVersion {
 			t.Fatalf("mod version = %q, want %q", l.ModVersion, legacyModVersion)
 		}
+		if !l.PlayerCollisions {
+			t.Fatal("player collisions should default to enabled")
+		}
+		if l.Cheats {
+			t.Fatal("cheats should default to disabled")
+		}
+	}
+}
+
+func TestCreateStoresGameRules(t *testing.T) {
+	s := &store{lobbies: make(map[string]*lobby), endpoints: make(map[string]udpSession)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/lobbies", strings.NewReader(`{
+		"name":"Rules", "hostName":"Host", "map":"Map", "maxPlayers":4,
+		"hostPort":7777, "respawnTime":0, "playerCollisions":false, "cheats":true
+	}`))
+	res := httptest.NewRecorder()
+	s.handleLobbies(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d", res.Code, http.StatusCreated)
+	}
+	for _, l := range s.lobbies {
+		if l.PlayerCollisions {
+			t.Fatal("player collisions = true, want false")
+		}
+		if !l.Cheats {
+			t.Fatal("cheats = false, want true")
+		}
 	}
 }
 

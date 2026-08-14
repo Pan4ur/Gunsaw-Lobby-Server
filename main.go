@@ -54,6 +54,8 @@ type lobby struct {
 	PlayerCollisions    bool         `json:"playerCollisions"`
 	Cheats              bool         `json:"cheats"`
 	AllowSwap           *bool        `json:"allowSwap"`
+	AllowScaleChanging  *bool        `json:"allowScaleChanging"`
+	InitialScale        *float32     `json:"initialScale"`
 	ConnectionMode      string       `json:"connectionMode"`
 	HostPort            int          `json:"hostPort"`
 	HostIP              string       `json:"hostIp"`
@@ -94,22 +96,24 @@ type store struct {
 }
 
 type createRequest struct {
-	Name                string `json:"name"`
-	HostName            string `json:"hostName"`
-	Map                 string `json:"map"`
-	MaxPlayers          int    `json:"maxPlayers"`
-	HostPort            int    `json:"hostPort"`
-	PVP                 bool   `json:"pvp"`
-	CanGrab             bool   `json:"canGrab"`
-	GrabOnlyUnconscious bool   `json:"grabOnlyUnconscious"`
-	AllowRespawn        bool   `json:"allowRespawn"`
-	RespawnTime         int    `json:"respawnTime"`
-	RespawnAtStart      bool   `json:"respawnAtStart"`
-	PlayerCollisions    *bool  `json:"playerCollisions"`
-	Cheats              bool   `json:"cheats"`
-	AllowSwap           *bool  `json:"allowSwap"`
-	ConnectionMode      string `json:"connectionMode"`
-	ModVersion          string `json:"modVersion"`
+	Name                string   `json:"name"`
+	HostName            string   `json:"hostName"`
+	Map                 string   `json:"map"`
+	MaxPlayers          int      `json:"maxPlayers"`
+	HostPort            int      `json:"hostPort"`
+	PVP                 bool     `json:"pvp"`
+	CanGrab             bool     `json:"canGrab"`
+	GrabOnlyUnconscious bool     `json:"grabOnlyUnconscious"`
+	AllowRespawn        bool     `json:"allowRespawn"`
+	RespawnTime         int      `json:"respawnTime"`
+	RespawnAtStart      bool     `json:"respawnAtStart"`
+	PlayerCollisions    *bool    `json:"playerCollisions"`
+	Cheats              bool     `json:"cheats"`
+	AllowSwap           *bool    `json:"allowSwap"`
+	AllowScaleChanging  *bool    `json:"allowScaleChanging"`
+	InitialScale        *float32 `json:"initialScale"`
+	ConnectionMode      string   `json:"connectionMode"`
+	ModVersion          string   `json:"modVersion"`
 }
 
 type heartbeatRequest struct {
@@ -331,7 +335,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.ModVersion = normalizeModVersion(in.ModVersion)
-		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || in.MaxPlayers < 1 || in.MaxPlayers > 16 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 {
+		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || in.MaxPlayers < 1 || in.MaxPlayers > 16 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
@@ -360,6 +364,18 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 		} else {
 			allowSwap := true
 			l.AllowSwap = &allowSwap
+		}
+		if in.AllowScaleChanging != nil {
+			l.AllowScaleChanging = in.AllowScaleChanging
+		} else {
+			allowScaleChanging := true
+			l.AllowScaleChanging = &allowScaleChanging
+		}
+		if in.InitialScale != nil {
+			l.InitialScale = in.InitialScale
+		} else {
+			initialScale := float32(1.0)
+			l.InitialScale = &initialScale
 		}
 		s.mu.Lock()
 		s.lobbies[l.ID] = l
