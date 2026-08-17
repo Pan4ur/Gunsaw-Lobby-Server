@@ -114,7 +114,7 @@ func TestCreateStoresGameRules(t *testing.T) {
 	s := &store{lobbies: make(map[string]*lobby), endpoints: make(map[string]udpSession)}
 	req := httptest.NewRequest(http.MethodPost, "/v1/lobbies", strings.NewReader(`{
 		"name":"Rules", "hostName":"Host", "map":"Map", "maxPlayers":4,
-		"hostPort":7777, "respawnTime":0, "playerCollisions":false, "cheats":true
+		"hostPort":7777, "respawnTime":0, "playerCollisions":false, "cheats":true, "brutalMode":true, "allowObserver":false
 	}`))
 	res := httptest.NewRecorder()
 	s.handleLobbies(res, req)
@@ -127,6 +127,22 @@ func TestCreateStoresGameRules(t *testing.T) {
 		}
 		if !l.Cheats {
 			t.Fatal("cheats = false, want true")
+		}
+		if !l.BrutalMode {
+			t.Fatal("brutal mode = false, want true")
+		}
+		if l.AllowObserver {
+			t.Fatal("allow observer = true, want false")
+		}
+		update := httptest.NewRequest(http.MethodPut, "/v1/lobbies/"+l.ID, strings.NewReader(`{"players":1,"brutalMode":false}`))
+		update.Header.Set("Authorization", "Bearer "+l.HostKey)
+		updateRes := httptest.NewRecorder()
+		s.handleLobby(updateRes, update)
+		if updateRes.Code != http.StatusOK {
+			t.Fatalf("update status = %d, want %d", updateRes.Code, http.StatusOK)
+		}
+		if l.BrutalMode {
+			t.Fatal("brutal mode = true after update, want false")
 		}
 	}
 }

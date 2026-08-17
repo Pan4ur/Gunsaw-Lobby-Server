@@ -53,6 +53,8 @@ type lobby struct {
 	RespawnAtStart      bool         `json:"respawnAtStart"`
 	PlayerCollisions    bool         `json:"playerCollisions"`
 	Cheats              bool         `json:"cheats"`
+	BrutalMode          bool         `json:"brutalMode"`
+	AllowObserver       bool         `json:"allowObserver"`
 	AllowSwap           *bool        `json:"allowSwap"`
 	AllowScaleChanging  *bool        `json:"allowScaleChanging"`
 	InitialScale        *float32     `json:"initialScale"`
@@ -109,6 +111,8 @@ type createRequest struct {
 	RespawnAtStart      bool     `json:"respawnAtStart"`
 	PlayerCollisions    *bool    `json:"playerCollisions"`
 	Cheats              bool     `json:"cheats"`
+	BrutalMode          bool     `json:"brutalMode"`
+	AllowObserver       *bool    `json:"allowObserver"`
 	AllowSwap           *bool    `json:"allowSwap"`
 	AllowScaleChanging  *bool    `json:"allowScaleChanging"`
 	InitialScale        *float32 `json:"initialScale"`
@@ -117,8 +121,10 @@ type createRequest struct {
 }
 
 type heartbeatRequest struct {
-	Players int    `json:"players"`
-	Map     string `json:"map"`
+	Players       int    `json:"players"`
+	Map           string `json:"map"`
+	BrutalMode    *bool  `json:"brutalMode"`
+	AllowObserver *bool  `json:"allowObserver"`
 }
 
 type joinRequest struct {
@@ -350,7 +356,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
 			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime,
-			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats,
+			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats, BrutalMode: in.BrutalMode, AllowObserver: true,
 			ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
 			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
@@ -358,6 +364,9 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.PlayerCollisions != nil {
 			l.PlayerCollisions = *in.PlayerCollisions
+		}
+		if in.AllowObserver != nil {
+			l.AllowObserver = *in.AllowObserver
 		}
 		if in.AllowSwap != nil {
 			l.AllowSwap = in.AllowSwap
@@ -535,6 +544,12 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		l.Players = in.Players
 		if in.Map != "" {
 			l.Map = in.Map
+		}
+		if in.BrutalMode != nil {
+			l.BrutalMode = *in.BrutalMode
+		}
+		if in.AllowObserver != nil {
+			l.AllowObserver = *in.AllowObserver
 		}
 		l.UpdatedAt = time.Now()
 		s.mu.Unlock()
