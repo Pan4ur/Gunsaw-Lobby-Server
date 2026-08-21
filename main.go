@@ -55,9 +55,15 @@ type lobby struct {
 	Cheats              bool         `json:"cheats"`
 	BrutalMode          bool         `json:"brutalMode"`
 	AllowObserver       bool         `json:"allowObserver"`
+	Teams               bool         `json:"teams"`
+	TeamsCfg            string       `json:"teamsCfg"`
 	AllowSwap           *bool        `json:"allowSwap"`
 	AllowScaleChanging  *bool        `json:"allowScaleChanging"`
 	InitialScale        *float32     `json:"initialScale"`
+	StartingWeapon      string       `json:"startingWeapon"`
+	RespawnWeapon       string       `json:"respawnWeapon"`
+	StartingAmmo        string       `json:"startingAmmo"`
+	RespawnAmmo         string       `json:"respawnAmmo"`
 	ConnectionMode      string       `json:"connectionMode"`
 	HostPort            int          `json:"hostPort"`
 	HostIP              string       `json:"hostIp"`
@@ -113,18 +119,30 @@ type createRequest struct {
 	Cheats              bool     `json:"cheats"`
 	BrutalMode          bool     `json:"brutalMode"`
 	AllowObserver       *bool    `json:"allowObserver"`
+	Teams               bool     `json:"teams"`
+	TeamsCfg            string   `json:"teamsCfg"`
 	AllowSwap           *bool    `json:"allowSwap"`
 	AllowScaleChanging  *bool    `json:"allowScaleChanging"`
 	InitialScale        *float32 `json:"initialScale"`
+	StartingWeapon      string   `json:"startingWeapon"`
+	RespawnWeapon       string   `json:"respawnWeapon"`
+	StartingAmmo        string   `json:"startingAmmo"`
+	RespawnAmmo         string   `json:"respawnAmmo"`
 	ConnectionMode      string   `json:"connectionMode"`
 	ModVersion          string   `json:"modVersion"`
 }
 
 type heartbeatRequest struct {
-	Players       int    `json:"players"`
-	Map           string `json:"map"`
-	BrutalMode    *bool  `json:"brutalMode"`
-	AllowObserver *bool  `json:"allowObserver"`
+	Players        int     `json:"players"`
+	Map            string  `json:"map"`
+	BrutalMode     *bool   `json:"brutalMode"`
+	AllowObserver  *bool   `json:"allowObserver"`
+	Teams          *bool   `json:"teams"`
+	TeamsCfg       *string `json:"teamsCfg"`
+	StartingWeapon *string `json:"startingWeapon"`
+	RespawnWeapon  *string `json:"respawnWeapon"`
+	StartingAmmo   *string `json:"startingAmmo"`
+	RespawnAmmo    *string `json:"respawnAmmo"`
 }
 
 type joinRequest struct {
@@ -341,7 +359,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.ModVersion = normalizeModVersion(in.ModVersion)
-		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || in.MaxPlayers < 1 || in.MaxPlayers > 16 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
+		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || len(in.TeamsCfg) > 512 || len(in.StartingWeapon) > 512 || len(in.RespawnWeapon) > 512 || len(in.StartingAmmo) > 64 || len(in.RespawnAmmo) > 64 || in.MaxPlayers < 1 || in.MaxPlayers > 16 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
@@ -356,7 +374,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
 			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime,
-			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats, BrutalMode: in.BrutalMode, AllowObserver: true,
+			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats, BrutalMode: in.BrutalMode, AllowObserver: true, Teams: in.Teams, TeamsCfg: in.TeamsCfg, StartingWeapon: in.StartingWeapon, RespawnWeapon: in.RespawnWeapon, StartingAmmo: in.StartingAmmo, RespawnAmmo: in.RespawnAmmo,
 			ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
 			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
@@ -550,6 +568,24 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.AllowObserver != nil {
 			l.AllowObserver = *in.AllowObserver
+		}
+		if in.Teams != nil {
+			l.Teams = *in.Teams
+		}
+		if in.TeamsCfg != nil && len(*in.TeamsCfg) <= 512 {
+			l.TeamsCfg = *in.TeamsCfg
+		}
+		if in.StartingWeapon != nil && len(*in.StartingWeapon) <= 512 {
+			l.StartingWeapon = *in.StartingWeapon
+		}
+		if in.RespawnWeapon != nil && len(*in.RespawnWeapon) <= 512 {
+			l.RespawnWeapon = *in.RespawnWeapon
+		}
+		if in.StartingAmmo != nil && len(*in.StartingAmmo) <= 64 {
+			l.StartingAmmo = *in.StartingAmmo
+		}
+		if in.RespawnAmmo != nil && len(*in.RespawnAmmo) <= 64 {
+			l.RespawnAmmo = *in.RespawnAmmo
 		}
 		l.UpdatedAt = time.Now()
 		s.mu.Unlock()
