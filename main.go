@@ -50,6 +50,7 @@ type lobby struct {
 	GrabOnlyUnconscious bool         `json:"grabOnlyUnconscious"`
 	AllowRespawn        bool         `json:"allowRespawn"`
 	RespawnTime         int          `json:"respawnTime"`
+	NumberOfLives       int          `json:"numberOfLives"`
 	RespawnAtStart      bool         `json:"respawnAtStart"`
 	PlayerCollisions    bool         `json:"playerCollisions"`
 	Cheats              bool         `json:"cheats"`
@@ -114,6 +115,7 @@ type createRequest struct {
 	GrabOnlyUnconscious bool     `json:"grabOnlyUnconscious"`
 	AllowRespawn        bool     `json:"allowRespawn"`
 	RespawnTime         int      `json:"respawnTime"`
+	NumberOfLives       int      `json:"numberOfLives"`
 	RespawnAtStart      bool     `json:"respawnAtStart"`
 	PlayerCollisions    *bool    `json:"playerCollisions"`
 	Cheats              bool     `json:"cheats"`
@@ -143,6 +145,7 @@ type heartbeatRequest struct {
 	RespawnWeapon  *string `json:"respawnWeapon"`
 	StartingAmmo   *string `json:"startingAmmo"`
 	RespawnAmmo    *string `json:"respawnAmmo"`
+	NumberOfLives  *int    `json:"numberOfLives"`
 }
 
 type joinRequest struct {
@@ -359,7 +362,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.ModVersion = normalizeModVersion(in.ModVersion)
-		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || len(in.TeamsCfg) > 512 || len(in.StartingWeapon) > 512 || len(in.RespawnWeapon) > 512 || len(in.StartingAmmo) > 64 || len(in.RespawnAmmo) > 64 || in.MaxPlayers < 1 || in.MaxPlayers > 16 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
+		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || len(in.TeamsCfg) > 512 || len(in.StartingWeapon) > 512 || len(in.RespawnWeapon) > 512 || len(in.StartingAmmo) > 64 || len(in.RespawnAmmo) > 64 || in.MaxPlayers < 1 || in.MaxPlayers > 16 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.NumberOfLives < 0 || in.NumberOfLives > 65535 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
@@ -373,7 +376,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			ID: randomHex(16), Name: in.Name, HostName: normalizePlayerName(in.HostName), Map: in.Map,
 			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
-			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime,
+			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime, NumberOfLives: in.NumberOfLives,
 			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats, BrutalMode: in.BrutalMode, AllowObserver: true, Teams: in.Teams, TeamsCfg: in.TeamsCfg, StartingWeapon: in.StartingWeapon, RespawnWeapon: in.RespawnWeapon, StartingAmmo: in.StartingAmmo, RespawnAmmo: in.RespawnAmmo,
 			ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
@@ -586,6 +589,9 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.RespawnAmmo != nil && len(*in.RespawnAmmo) <= 64 {
 			l.RespawnAmmo = *in.RespawnAmmo
+		}
+		if in.NumberOfLives != nil && *in.NumberOfLives >= 0 && *in.NumberOfLives <= 65535 {
+			l.NumberOfLives = *in.NumberOfLives
 		}
 		l.UpdatedAt = time.Now()
 		s.mu.Unlock()
