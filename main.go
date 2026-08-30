@@ -97,10 +97,27 @@ type udpSession struct {
 	peerID  uint16
 }
 
+type endpointKey struct {
+	ip   [16]byte
+	port int
+	zone string
+}
+
+func makeEndpointKey(addr *net.UDPAddr) endpointKey {
+	var key endpointKey
+	if addr == nil {
+		return key
+	}
+	copy(key.ip[:], addr.IP.To16())
+	key.port = addr.Port
+	key.zone = addr.Zone
+	return key
+}
+
 type store struct {
 	mu           sync.Mutex
 	lobbies      map[string]*lobby
-	endpoints    map[string]udpSession
+	endpoints    map[endpointKey]udpSession
 	relayAddress string
 }
 
@@ -218,7 +235,7 @@ func (s *store) deletePeerLocked(l *lobby, key string) {
 		return
 	}
 	if p.addr != nil {
-		delete(s.endpoints, p.addr.String())
+		delete(s.endpoints, makeEndpointKey(p.addr))
 	}
 	delete(l.peers, key)
 }
@@ -322,7 +339,7 @@ func main() {
 
 	s := &store{
 		lobbies:      make(map[string]*lobby),
-		endpoints:    make(map[string]udpSession),
+		endpoints:    make(map[endpointKey]udpSession),
 		relayAddress: *relayPublicAddress,
 	}
 	go func() {
@@ -644,7 +661,7 @@ func serveUDP(s *store, conn *net.UDPConn) {
 		if n < 5 || !hasMagic(buffer[:n]) {
 			continue
 		}
-		packet := append([]byte(nil), buffer[:n]...)
+		packet := buffer[:n]
 		switch packet[4] {
 		case udpAuth:
 			s.handleUDPAuth(conn, addr, packet)
@@ -676,7 +693,7 @@ func (s *store) handleUDPAuth(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 	if l != nil && key == l.HostKey {
 		peerID = l.HostPeer
 		if l.HostAddr != nil {
-			delete(s.endpoints, l.HostAddr.String())
+			delete(s.endpoints, makeEndpointKey(l.HostAddr))
 		}
 		l.HostAddr = cloneUDPAddr(addr)
 		l.HostP2P = false
@@ -687,7 +704,7 @@ func (s *store) handleUDPAuth(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 		} else if ok {
 			peerID = p.peerID
 			if p.addr != nil {
-				delete(s.endpoints, p.addr.String())
+				delete(s.endpoints, makeEndpointKey(p.addr))
 			}
 			p.addr = cloneUDPAddr(addr)
 			p.ip = udpIP(addr)
@@ -698,7 +715,7 @@ func (s *store) handleUDPAuth(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 		}
 	}
 	if peerID != 0 {
-		s.endpoints[addr.String()] = udpSession{lobbyID: id, key: key, peerID: peerID}
+		s.endpoints[makeEndpointKey(addr)] = udpSession{lobbyID: id, key: key, peerID: peerID}
 	}
 	var p2pKey []byte
 	if peerID != 0 {
@@ -754,7 +771,7 @@ func (s *store) handleUDPKeepAlive(addr *net.UDPAddr) {
 }
 
 func (s *store) validSessionLocked(addr *net.UDPAddr) (udpSession, *lobby, bool) {
-	session, ok := s.endpoints[addr.String()]
+	session, ok := s.endpoints[makeEndpointKey(addr)]
 	if !ok {
 		return udpSession{}, nil, false
 	}
@@ -763,10 +780,10 @@ func (s *store) validSessionLocked(addr *net.UDPAddr) (udpSession, *lobby, bool)
 		return udpSession{}, nil, false
 	}
 	if session.key == l.HostKey {
-		return session, l, l.HostAddr != nil && l.HostAddr.String() == addr.String()
+		return session, l, l.HostAddr != nil && makeEndpointKey(l.HostAddr) == makeEndpointKey(addr)
 	}
 	p, exists := l.peers[session.key]
-	return session, l, exists && p.addr != nil && p.addr.String() == addr.String() && p.peerID == session.peerID
+	return session, l, exists && p.addr != nil && makeEndpointKey(p.addr) == makeEndpointKey(addr) && p.peerID == session.peerID
 }
 
 type candidateNotice struct {
@@ -829,20 +846,20 @@ func (s *store) handleUDPData(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 	targetID := uint16(packet[5]) | uint16(packet[6])<<8
 
 	s.mu.Lock()
-	session, ok := s.endpoints[addr.String()]
+	session, ok := s.endpoints[makeEndpointKey(addr)]
 	l := s.lobbies[session.lobbyID]
 	if !ok || l == nil {
 		s.mu.Unlock()
 		return
 	}
 	if session.key == l.HostKey {
-		if l.HostAddr == nil || l.HostAddr.String() != addr.String() {
+		if l.HostAddr == nil || makeEndpointKey(l.HostAddr) != makeEndpointKey(addr) {
 			s.mu.Unlock()
 			return
 		}
 	} else {
 		p, exists := l.peers[session.key]
-		if !exists || p.addr == nil || p.addr.String() != addr.String() || p.peerID != session.peerID {
+		if !exists || p.addr == nil || makeEndpointKey(p.addr) != makeEndpointKey(addr) || p.peerID != session.peerID {
 			s.mu.Unlock()
 			return
 		}
@@ -852,29 +869,32 @@ func (s *store) handleUDPData(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 
 	targets := collectTargets(l, session.peerID, targetID)
 	s.mu.Unlock()
-	if len(targets) == 0 {
+	if targets.count == 0 {
 		return
 	}
 
-	forwarded := make([]byte, 5+2+len(packet)-7)
-	copy(forwarded[:4], udpMagic)
-	forwarded[4] = udpForwarded
-	forwarded[5] = byte(session.peerID)
-	forwarded[6] = byte(session.peerID >> 8)
-	copy(forwarded[7:], packet[7:])
-	for _, target := range targets {
-		_, _ = conn.WriteToUDP(forwarded, target)
+	packet[4] = udpForwarded
+	packet[5] = byte(session.peerID)
+	packet[6] = byte(session.peerID >> 8)
+	for i := 0; i < targets.count; i++ {
+		_, _ = conn.WriteToUDP(packet, targets.addrs[i])
 	}
 }
 
-func collectTargets(l *lobby, senderID, targetID uint16) []*net.UDPAddr {
-	result := make([]*net.UDPAddr, 0, len(l.peers)+1)
+type udpTargets struct {
+	addrs [16]*net.UDPAddr
+	count int
+}
+
+func collectTargets(l *lobby, senderID, targetID uint16) udpTargets {
+	var result udpTargets
 	add := func(peerID uint16, addr *net.UDPAddr) {
-		if addr == nil || peerID == senderID {
+		if addr == nil || peerID == senderID || result.count == len(result.addrs) {
 			return
 		}
 		if targetID == 0 || targetID == peerID {
-			result = append(result, cloneUDPAddr(addr))
+			result.addrs[result.count] = addr
+			result.count++
 		}
 	}
 	add(l.HostPeer, l.HostAddr)
