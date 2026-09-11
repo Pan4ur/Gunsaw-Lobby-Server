@@ -51,6 +51,8 @@ type lobby struct {
 	AllowRespawn        bool         `json:"allowRespawn"`
 	RespawnTime         int          `json:"respawnTime"`
 	NumberOfLives       int          `json:"numberOfLives"`
+	HealthFactor        float32      `json:"healthFactor"`
+	RegenFactor         float32      `json:"regenFactor"`
 	RespawnAtStart      bool         `json:"respawnAtStart"`
 	PlayerCollisions    bool         `json:"playerCollisions"`
 	Cheats              bool         `json:"cheats"`
@@ -133,6 +135,8 @@ type createRequest struct {
 	AllowRespawn        bool     `json:"allowRespawn"`
 	RespawnTime         int      `json:"respawnTime"`
 	NumberOfLives       int      `json:"numberOfLives"`
+	HealthFactor        float32  `json:"healthFactor"`
+	RegenFactor         *float32 `json:"regenFactor"`
 	RespawnAtStart      bool     `json:"respawnAtStart"`
 	PlayerCollisions    *bool    `json:"playerCollisions"`
 	Cheats              bool     `json:"cheats"`
@@ -152,17 +156,19 @@ type createRequest struct {
 }
 
 type heartbeatRequest struct {
-	Players        int     `json:"players"`
-	Map            string  `json:"map"`
-	BrutalMode     *bool   `json:"brutalMode"`
-	AllowObserver  *bool   `json:"allowObserver"`
-	Teams          *bool   `json:"teams"`
-	TeamsCfg       *string `json:"teamsCfg"`
-	StartingWeapon *string `json:"startingWeapon"`
-	RespawnWeapon  *string `json:"respawnWeapon"`
-	StartingAmmo   *string `json:"startingAmmo"`
-	RespawnAmmo    *string `json:"respawnAmmo"`
-	NumberOfLives  *int    `json:"numberOfLives"`
+	Players        int      `json:"players"`
+	Map            string   `json:"map"`
+	BrutalMode     *bool    `json:"brutalMode"`
+	AllowObserver  *bool    `json:"allowObserver"`
+	Teams          *bool    `json:"teams"`
+	TeamsCfg       *string  `json:"teamsCfg"`
+	StartingWeapon *string  `json:"startingWeapon"`
+	RespawnWeapon  *string  `json:"respawnWeapon"`
+	StartingAmmo   *string  `json:"startingAmmo"`
+	RespawnAmmo    *string  `json:"respawnAmmo"`
+	NumberOfLives  *int     `json:"numberOfLives"`
+	HealthFactor   *float32 `json:"healthFactor"`
+	RegenFactor    *float32 `json:"regenFactor"`
 }
 
 type joinRequest struct {
@@ -379,7 +385,14 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.ModVersion = normalizeModVersion(in.ModVersion)
-		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || len(in.TeamsCfg) > 512 || len(in.StartingWeapon) > 512 || len(in.RespawnWeapon) > 512 || len(in.StartingAmmo) > 64 || len(in.RespawnAmmo) > 64 || in.MaxPlayers < 1 || in.MaxPlayers > 16 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.NumberOfLives < 0 || in.NumberOfLives > 65535 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
+		if in.HealthFactor == 0 {
+			in.HealthFactor = 1
+		}
+		regenFactor := float32(1)
+		if in.RegenFactor != nil {
+			regenFactor = *in.RegenFactor
+		}
+		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || len(in.TeamsCfg) > 512 || len(in.StartingWeapon) > 512 || len(in.RespawnWeapon) > 512 || len(in.StartingAmmo) > 64 || len(in.RespawnAmmo) > 64 || in.MaxPlayers < 1 || in.MaxPlayers > 64 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.NumberOfLives < 0 || in.NumberOfLives > 65535 || in.HealthFactor < 0.01 || in.HealthFactor > 10 || regenFactor < 0 || regenFactor > 10 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
@@ -393,7 +406,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			ID: randomHex(16), Name: in.Name, HostName: normalizePlayerName(in.HostName), Map: in.Map,
 			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
-			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime, NumberOfLives: in.NumberOfLives,
+			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime, NumberOfLives: in.NumberOfLives, HealthFactor: in.HealthFactor, RegenFactor: regenFactor,
 			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats, BrutalMode: in.BrutalMode, AllowObserver: true, Teams: in.Teams, TeamsCfg: in.TeamsCfg, StartingWeapon: in.StartingWeapon, RespawnWeapon: in.RespawnWeapon, StartingAmmo: in.StartingAmmo, RespawnAmmo: in.RespawnAmmo,
 			ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
@@ -609,6 +622,12 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.NumberOfLives != nil && *in.NumberOfLives >= 0 && *in.NumberOfLives <= 65535 {
 			l.NumberOfLives = *in.NumberOfLives
+		}
+		if in.HealthFactor != nil && *in.HealthFactor >= 0.01 && *in.HealthFactor <= 10 {
+			l.HealthFactor = *in.HealthFactor
+		}
+		if in.RegenFactor != nil && *in.RegenFactor >= 0 && *in.RegenFactor <= 10 {
+			l.RegenFactor = *in.RegenFactor
 		}
 		l.UpdatedAt = time.Now()
 		s.mu.Unlock()
