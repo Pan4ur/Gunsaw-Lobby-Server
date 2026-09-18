@@ -53,6 +53,7 @@ type lobby struct {
 	NumberOfLives       int          `json:"numberOfLives"`
 	HealthFactor        float32      `json:"healthFactor"`
 	RegenFactor         float32      `json:"regenFactor"`
+	Blackout            bool         `json:"blackout"`
 	RespawnAtStart      bool         `json:"respawnAtStart"`
 	PlayerCollisions    bool         `json:"playerCollisions"`
 	Cheats              bool         `json:"cheats"`
@@ -137,6 +138,7 @@ type createRequest struct {
 	NumberOfLives       int      `json:"numberOfLives"`
 	HealthFactor        float32  `json:"healthFactor"`
 	RegenFactor         *float32 `json:"regenFactor"`
+	Blackout            bool     `json:"blackout"`
 	RespawnAtStart      bool     `json:"respawnAtStart"`
 	PlayerCollisions    *bool    `json:"playerCollisions"`
 	Cheats              bool     `json:"cheats"`
@@ -169,6 +171,7 @@ type heartbeatRequest struct {
 	NumberOfLives  *int     `json:"numberOfLives"`
 	HealthFactor   *float32 `json:"healthFactor"`
 	RegenFactor    *float32 `json:"regenFactor"`
+	Blackout       *bool    `json:"blackout"`
 }
 
 type joinRequest struct {
@@ -406,7 +409,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			ID: randomHex(16), Name: in.Name, HostName: normalizePlayerName(in.HostName), Map: in.Map,
 			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
-			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime, NumberOfLives: in.NumberOfLives, HealthFactor: in.HealthFactor, RegenFactor: regenFactor,
+			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime, NumberOfLives: in.NumberOfLives, HealthFactor: in.HealthFactor, RegenFactor: regenFactor, Blackout: in.Blackout,
 			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats, BrutalMode: in.BrutalMode, AllowObserver: true, Teams: in.Teams, TeamsCfg: in.TeamsCfg, StartingWeapon: in.StartingWeapon, RespawnWeapon: in.RespawnWeapon, StartingAmmo: in.StartingAmmo, RespawnAmmo: in.RespawnAmmo,
 			ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
@@ -628,6 +631,9 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.RegenFactor != nil && *in.RegenFactor >= 0 && *in.RegenFactor <= 10 {
 			l.RegenFactor = *in.RegenFactor
+		}
+		if in.Blackout != nil {
+			l.Blackout = *in.Blackout
 		}
 		l.UpdatedAt = time.Now()
 		s.mu.Unlock()
