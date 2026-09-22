@@ -54,6 +54,7 @@ type lobby struct {
 	HealthFactor        float32      `json:"healthFactor"`
 	RegenFactor         float32      `json:"regenFactor"`
 	Blackout            bool         `json:"blackout"`
+	RestrictLight       bool         `json:"restrictLight"`
 	RespawnAtStart      bool         `json:"respawnAtStart"`
 	PlayerCollisions    bool         `json:"playerCollisions"`
 	Cheats              bool         `json:"cheats"`
@@ -80,7 +81,7 @@ type lobby struct {
 	bannedIPs           map[string]time.Time
 	usedPeerIDs         map[uint16]bool
 	HostP2P             bool
-	P2PKey              []byte
+    P2PKey              []byte        `json:"-"`
 }
 
 type peer struct {
@@ -139,6 +140,7 @@ type createRequest struct {
 	HealthFactor        float32  `json:"healthFactor"`
 	RegenFactor         *float32 `json:"regenFactor"`
 	Blackout            bool     `json:"blackout"`
+	RestrictLight       bool     `json:"restrictLight"`
 	RespawnAtStart      bool     `json:"respawnAtStart"`
 	PlayerCollisions    *bool    `json:"playerCollisions"`
 	Cheats              bool     `json:"cheats"`
@@ -172,6 +174,7 @@ type heartbeatRequest struct {
 	HealthFactor   *float32 `json:"healthFactor"`
 	RegenFactor    *float32 `json:"regenFactor"`
 	Blackout       *bool    `json:"blackout"`
+	RestrictLight  *bool    `json:"restrictLight"`
 }
 
 type joinRequest struct {
@@ -409,7 +412,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			ID: randomHex(16), Name: in.Name, HostName: normalizePlayerName(in.HostName), Map: in.Map,
 			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
-			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime, NumberOfLives: in.NumberOfLives, HealthFactor: in.HealthFactor, RegenFactor: regenFactor, Blackout: in.Blackout,
+			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime, NumberOfLives: in.NumberOfLives, HealthFactor: in.HealthFactor, RegenFactor: regenFactor, Blackout: in.Blackout, RestrictLight: in.RestrictLight,
 			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats, BrutalMode: in.BrutalMode, AllowObserver: true, Teams: in.Teams, TeamsCfg: in.TeamsCfg, StartingWeapon: in.StartingWeapon, RespawnWeapon: in.RespawnWeapon, StartingAmmo: in.StartingAmmo, RespawnAmmo: in.RespawnAmmo,
 			ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
@@ -634,6 +637,9 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.Blackout != nil {
 			l.Blackout = *in.Blackout
+		}
+		if in.RestrictLight != nil {
+			l.RestrictLight = *in.RestrictLight
 		}
 		l.UpdatedAt = time.Now()
 		s.mu.Unlock()
@@ -907,7 +913,7 @@ func (s *store) handleUDPData(conn *net.UDPConn, addr *net.UDPAddr, packet []byt
 }
 
 type udpTargets struct {
-	addrs [16]*net.UDPAddr
+	addrs [64]*net.UDPAddr
 	count int
 }
 
