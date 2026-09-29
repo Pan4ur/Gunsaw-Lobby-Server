@@ -46,6 +46,9 @@ type lobby struct {
 	MaxPlayers          int          `json:"maxPlayers"`
 	Players             int          `json:"players"`
 	PVP                 bool         `json:"pvp"`
+	GunGame             bool         `json:"gunGame"`
+	GGSequence          string       `json:"ggSequence"`
+	GGOnDeath           string       `json:"ggOnDeath"`
 	CanGrab             bool         `json:"canGrab"`
 	GrabOnlyUnconscious bool         `json:"grabOnlyUnconscious"`
 	AllowRespawn        bool         `json:"allowRespawn"`
@@ -81,7 +84,7 @@ type lobby struct {
 	bannedIPs           map[string]time.Time
 	usedPeerIDs         map[uint16]bool
 	HostP2P             bool
-    P2PKey              []byte        `json:"-"`
+	P2PKey              []byte `json:"-"`
 }
 
 type peer struct {
@@ -132,6 +135,9 @@ type createRequest struct {
 	MaxPlayers          int      `json:"maxPlayers"`
 	HostPort            int      `json:"hostPort"`
 	PVP                 bool     `json:"pvp"`
+	GunGame             bool     `json:"gunGame"`
+	GGSequence          string   `json:"ggSequence"`
+	GGOnDeath           string   `json:"ggOnDeath"`
 	CanGrab             bool     `json:"canGrab"`
 	GrabOnlyUnconscious bool     `json:"grabOnlyUnconscious"`
 	AllowRespawn        bool     `json:"allowRespawn"`
@@ -168,6 +174,9 @@ type heartbeatRequest struct {
 	TeamsCfg       *string  `json:"teamsCfg"`
 	StartingWeapon *string  `json:"startingWeapon"`
 	RespawnWeapon  *string  `json:"respawnWeapon"`
+	GunGame        *bool    `json:"gunGame"`
+	GGSequence     *string  `json:"ggSequence"`
+	GGOnDeath      *string  `json:"ggOnDeath"`
 	StartingAmmo   *string  `json:"startingAmmo"`
 	RespawnAmmo    *string  `json:"respawnAmmo"`
 	NumberOfLives  *int     `json:"numberOfLives"`
@@ -394,11 +403,14 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 		if in.HealthFactor == 0 {
 			in.HealthFactor = 1
 		}
+		if in.GGOnDeath == "" {
+			in.GGOnDeath = "Reset"
+		}
 		regenFactor := float32(1)
 		if in.RegenFactor != nil {
 			regenFactor = *in.RegenFactor
 		}
-		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || len(in.TeamsCfg) > 512 || len(in.StartingWeapon) > 512 || len(in.RespawnWeapon) > 512 || len(in.StartingAmmo) > 64 || len(in.RespawnAmmo) > 64 || in.MaxPlayers < 1 || in.MaxPlayers > 64 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.NumberOfLives < 0 || in.NumberOfLives > 65535 || in.HealthFactor < 0.01 || in.HealthFactor > 10 || regenFactor < 0 || regenFactor > 10 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
+		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || len(in.TeamsCfg) > 512 || len(in.StartingWeapon) > 512 || len(in.RespawnWeapon) > 512 || len(in.GGSequence) > 512 || len(in.StartingAmmo) > 64 || len(in.RespawnAmmo) > 64 || in.GGOnDeath != "Reset" && in.GGOnDeath != "Rollback" && in.GGOnDeath != "None" || in.MaxPlayers < 1 || in.MaxPlayers > 64 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.NumberOfLives < 0 || in.NumberOfLives > 65535 || in.HealthFactor < 0.01 || in.HealthFactor > 10 || regenFactor < 0 || regenFactor > 10 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
@@ -410,7 +422,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 		}
 		l := &lobby{
 			ID: randomHex(16), Name: in.Name, HostName: normalizePlayerName(in.HostName), Map: in.Map,
-			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, CanGrab: in.CanGrab,
+			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, GunGame: in.GunGame, GGSequence: in.GGSequence, GGOnDeath: in.GGOnDeath, CanGrab: in.CanGrab,
 			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
 			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime, NumberOfLives: in.NumberOfLives, HealthFactor: in.HealthFactor, RegenFactor: regenFactor, Blackout: in.Blackout, RestrictLight: in.RestrictLight,
 			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats, BrutalMode: in.BrutalMode, AllowObserver: true, Teams: in.Teams, TeamsCfg: in.TeamsCfg, StartingWeapon: in.StartingWeapon, RespawnWeapon: in.RespawnWeapon, StartingAmmo: in.StartingAmmo, RespawnAmmo: in.RespawnAmmo,
@@ -619,6 +631,15 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.RespawnWeapon != nil && len(*in.RespawnWeapon) <= 512 {
 			l.RespawnWeapon = *in.RespawnWeapon
+		}
+		if in.GunGame != nil {
+			l.GunGame = *in.GunGame
+		}
+		if in.GGSequence != nil && len(*in.GGSequence) <= 512 {
+			l.GGSequence = *in.GGSequence
+		}
+		if in.GGOnDeath != nil && (*in.GGOnDeath == "Reset" || *in.GGOnDeath == "Rollback" || *in.GGOnDeath == "None") {
+			l.GGOnDeath = *in.GGOnDeath
 		}
 		if in.StartingAmmo != nil && len(*in.StartingAmmo) <= 64 {
 			l.StartingAmmo = *in.StartingAmmo
