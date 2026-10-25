@@ -166,24 +166,37 @@ type createRequest struct {
 }
 
 type heartbeatRequest struct {
-	Players        int      `json:"players"`
-	Map            string   `json:"map"`
-	BrutalMode     *bool    `json:"brutalMode"`
-	AllowObserver  *bool    `json:"allowObserver"`
-	Teams          *bool    `json:"teams"`
-	TeamsCfg       *string  `json:"teamsCfg"`
-	StartingWeapon *string  `json:"startingWeapon"`
-	RespawnWeapon  *string  `json:"respawnWeapon"`
-	GunGame        *bool    `json:"gunGame"`
-	GGSequence     *string  `json:"ggSequence"`
-	GGOnDeath      *string  `json:"ggOnDeath"`
-	StartingAmmo   *string  `json:"startingAmmo"`
-	RespawnAmmo    *string  `json:"respawnAmmo"`
-	NumberOfLives  *int     `json:"numberOfLives"`
-	HealthFactor   *float32 `json:"healthFactor"`
-	RegenFactor    *float32 `json:"regenFactor"`
-	Blackout       *bool    `json:"blackout"`
-	RestrictLight  *bool    `json:"restrictLight"`
+	Name                *string  `json:"name"`
+	MaxPlayers          *int     `json:"maxPlayers"`
+	PVP                 *bool    `json:"pvp"`
+	CanGrab             *bool    `json:"canGrab"`
+	GrabOnlyUnconscious *bool    `json:"grabOnlyUnconscious"`
+	AllowRespawn        *bool    `json:"allowRespawn"`
+	RespawnTime         *int     `json:"respawnTime"`
+	RespawnAtStart      *bool    `json:"respawnAtStart"`
+	PlayerCollisions    *bool    `json:"playerCollisions"`
+	Cheats              *bool    `json:"cheats"`
+	AllowSwap           *bool    `json:"allowSwap"`
+	AllowScaleChanging  *bool    `json:"allowScaleChanging"`
+	InitialScale        *float32 `json:"initialScale"`
+	Players             int      `json:"players"`
+	Map                 string   `json:"map"`
+	BrutalMode          *bool    `json:"brutalMode"`
+	AllowObserver       *bool    `json:"allowObserver"`
+	Teams               *bool    `json:"teams"`
+	TeamsCfg            *string  `json:"teamsCfg"`
+	StartingWeapon      *string  `json:"startingWeapon"`
+	RespawnWeapon       *string  `json:"respawnWeapon"`
+	GunGame             *bool    `json:"gunGame"`
+	GGSequence          *string  `json:"ggSequence"`
+	GGOnDeath           *string  `json:"ggOnDeath"`
+	StartingAmmo        *string  `json:"startingAmmo"`
+	RespawnAmmo         *string  `json:"respawnAmmo"`
+	NumberOfLives       *int     `json:"numberOfLives"`
+	HealthFactor        *float32 `json:"healthFactor"`
+	RegenFactor         *float32 `json:"regenFactor"`
+	Blackout            *bool    `json:"blackout"`
+	RestrictLight       *bool    `json:"restrictLight"`
 }
 
 type joinRequest struct {
@@ -605,11 +618,58 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		var in heartbeatRequest
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Players < 1 || in.Players > l.MaxPlayers || len(in.Map) > 64 {
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Players < 1 || in.Players > 64 || len(in.Map) > 64 {
 			fail(w, 400, "invalid player count")
 			return
 		}
+		if in.Name != nil && (len(*in.Name) < 1 || len(*in.Name) > 48) ||
+			in.MaxPlayers != nil && (*in.MaxPlayers < 1 || *in.MaxPlayers > 64) ||
+			in.RespawnTime != nil && (*in.RespawnTime < 0 || *in.RespawnTime > 3600) ||
+			in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2) {
+			fail(w, 400, "invalid lobby fields")
+			return
+		}
 		s.mu.Lock()
+		if in.Name != nil {
+			l.Name = *in.Name
+		}
+		if in.MaxPlayers != nil {
+			l.MaxPlayers = *in.MaxPlayers
+		}
+		if in.PVP != nil {
+			l.PVP = *in.PVP
+		}
+		if in.CanGrab != nil {
+			l.CanGrab = *in.CanGrab
+		}
+		if in.GrabOnlyUnconscious != nil {
+			l.GrabOnlyUnconscious = *in.GrabOnlyUnconscious
+		}
+		l.GrabOnlyUnconscious = l.CanGrab && l.GrabOnlyUnconscious
+		if in.AllowRespawn != nil {
+			l.AllowRespawn = *in.AllowRespawn
+		}
+		if in.RespawnTime != nil {
+			l.RespawnTime = *in.RespawnTime
+		}
+		if in.RespawnAtStart != nil {
+			l.RespawnAtStart = *in.RespawnAtStart
+		}
+		if in.PlayerCollisions != nil {
+			l.PlayerCollisions = *in.PlayerCollisions
+		}
+		if in.Cheats != nil {
+			l.Cheats = *in.Cheats
+		}
+		if in.AllowSwap != nil {
+			l.AllowSwap = in.AllowSwap
+		}
+		if in.AllowScaleChanging != nil {
+			l.AllowScaleChanging = in.AllowScaleChanging
+		}
+		if in.InitialScale != nil {
+			l.InitialScale = in.InitialScale
+		}
 		l.Players = in.Players
 		if in.Map != "" {
 			l.Map = in.Map
