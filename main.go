@@ -4,10 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +26,7 @@ const (
 	defaultBanTTL    = time.Hour
 	maxBanTTL        = 24 * time.Hour
 	maxDatagram      = 1400
+	maxLobbyMetadata = 64 * 1024
 
 	udpAuth       = byte(1)
 	udpAuthOK     = byte(2)
@@ -39,52 +43,106 @@ const (
 var udpMagic = []byte{'G', 'U', 'D', 'P'}
 
 type lobby struct {
-	ID                  string       `json:"id"`
-	Name                string       `json:"name"`
-	HostName            string       `json:"hostName"`
-	Map                 string       `json:"map"`
-	MaxPlayers          int          `json:"maxPlayers"`
-	Players             int          `json:"players"`
-	PVP                 bool         `json:"pvp"`
-	GunGame             bool         `json:"gunGame"`
-	GGSequence          string       `json:"ggSequence"`
-	GGOnDeath           string       `json:"ggOnDeath"`
-	CanGrab             bool         `json:"canGrab"`
-	GrabOnlyUnconscious bool         `json:"grabOnlyUnconscious"`
-	AllowRespawn        bool         `json:"allowRespawn"`
-	RespawnTime         int          `json:"respawnTime"`
-	NumberOfLives       int          `json:"numberOfLives"`
-	HealthFactor        float32      `json:"healthFactor"`
-	RegenFactor         float32      `json:"regenFactor"`
-	Blackout            bool         `json:"blackout"`
-	RestrictLight       bool         `json:"restrictLight"`
-	RespawnAtStart      bool         `json:"respawnAtStart"`
-	PlayerCollisions    bool         `json:"playerCollisions"`
-	Cheats              bool         `json:"cheats"`
-	BrutalMode          bool         `json:"brutalMode"`
-	AllowObserver       bool         `json:"allowObserver"`
-	Teams               bool         `json:"teams"`
-	TeamsCfg            string       `json:"teamsCfg"`
-	AllowSwap           *bool        `json:"allowSwap"`
-	AllowScaleChanging  *bool        `json:"allowScaleChanging"`
-	InitialScale        *float32     `json:"initialScale"`
-	StartingWeapon      string       `json:"startingWeapon"`
-	RespawnWeapon       string       `json:"respawnWeapon"`
-	StartingAmmo        string       `json:"startingAmmo"`
-	RespawnAmmo         string       `json:"respawnAmmo"`
-	ConnectionMode      string       `json:"connectionMode"`
-	HostPort            int          `json:"hostPort"`
-	HostIP              string       `json:"hostIp"`
-	ModVersion          string       `json:"modVersion"`
-	UpdatedAt           time.Time    `json:"-"`
-	HostKey             string       `json:"-"`
-	HostPeer            uint16       `json:"-"`
-	HostAddr            *net.UDPAddr `json:"-"`
-	peers               map[string]peer
-	bannedIPs           map[string]time.Time
-	usedPeerIDs         map[uint16]bool
-	HostP2P             bool
-	P2PKey              []byte `json:"-"`
+	ID             string       `json:"id"`
+	Name           string       `json:"name"`
+	HostName       string       `json:"hostName"`
+	Map            string       `json:"map"`
+	MaxPlayers     int          `json:"maxPlayers"`
+	Players        int          `json:"players"`
+	ConnectionMode string       `json:"connectionMode"`
+	HostPort       int          `json:"hostPort"`
+	HostIP         string       `json:"hostIp"`
+	ModVersion     string       `json:"modVersion"`
+	UpdatedAt      time.Time    `json:"-"`
+	HostKey        string       `json:"-"`
+	HostPeer       uint16       `json:"-"`
+	HostAddr       *net.UDPAddr `json:"-"`
+	peers          map[string]peer
+	bannedIPs      map[string]time.Time
+	usedPeerIDs    map[uint16]bool
+	HostP2P        bool
+	P2PKey         []byte `json:"-"`
+	metadata       map[string]json.RawMessage
+}
+
+var reservedLobbyFields = func() map[string]bool {
+	fields := make(map[string]bool)
+	t := reflect.TypeOf(lobby{})
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		fields[strings.ToLower(field.Name)] = true
+		if name := field.Tag.Get("json"); name != "" && name != "-" {
+			fields[strings.ToLower(name)] = true
+		}
+	}
+	for _, name := range []string{"lobby", "hostRelayKey", "hostPeerId", "relayKey", "peerId", "relayAddress"} {
+		fields[strings.ToLower(name)] = true
+	}
+	return fields
+}()
+
+func (l lobby) MarshalJSON() ([]byte, error) {
+	type publicLobby lobby
+	data, err := json.Marshal(publicLobby(l))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for name, value := range l.metadata {
+		if !reservedLobbyFields[strings.ToLower(name)] {
+			fields[name] = value
+		}
+	}
+	return json.Marshal(fields)
+}
+
+func decodeLobbyRequest(w http.ResponseWriter, r *http.Request, target any) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLobbyMetadata))
+	var data json.RawMessage
+	if err := decoder.Decode(&data); err != nil {
+		return nil, err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, errors.New("invalid lobby JSON")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, errors.New("expected lobby object")
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	for name := range fields {
+		if reservedLobbyFields[strings.ToLower(name)] {
+			delete(fields, name)
+		}
+	}
+	return mergeLobbyMetadata(nil, fields)
+}
+
+func mergeLobbyMetadata(current, update map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	merged := make(map[string]json.RawMessage, len(current)+len(update))
+	for name, value := range current {
+		merged[name] = value
+	}
+	for name, value := range update {
+		merged[name] = value
+	}
+	data, err := json.Marshal(merged)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxLobbyMetadata {
+		return nil, errors.New("lobby metadata too large")
+	}
+	return merged, nil
 }
 
 type peer struct {
@@ -129,74 +187,20 @@ type store struct {
 }
 
 type createRequest struct {
-	Name                string   `json:"name"`
-	HostName            string   `json:"hostName"`
-	Map                 string   `json:"map"`
-	MaxPlayers          int      `json:"maxPlayers"`
-	HostPort            int      `json:"hostPort"`
-	PVP                 bool     `json:"pvp"`
-	GunGame             bool     `json:"gunGame"`
-	GGSequence          string   `json:"ggSequence"`
-	GGOnDeath           string   `json:"ggOnDeath"`
-	CanGrab             bool     `json:"canGrab"`
-	GrabOnlyUnconscious bool     `json:"grabOnlyUnconscious"`
-	AllowRespawn        bool     `json:"allowRespawn"`
-	RespawnTime         int      `json:"respawnTime"`
-	NumberOfLives       int      `json:"numberOfLives"`
-	HealthFactor        float32  `json:"healthFactor"`
-	RegenFactor         *float32 `json:"regenFactor"`
-	Blackout            bool     `json:"blackout"`
-	RestrictLight       bool     `json:"restrictLight"`
-	RespawnAtStart      bool     `json:"respawnAtStart"`
-	PlayerCollisions    *bool    `json:"playerCollisions"`
-	Cheats              bool     `json:"cheats"`
-	BrutalMode          bool     `json:"brutalMode"`
-	AllowObserver       *bool    `json:"allowObserver"`
-	Teams               bool     `json:"teams"`
-	TeamsCfg            string   `json:"teamsCfg"`
-	AllowSwap           *bool    `json:"allowSwap"`
-	AllowScaleChanging  *bool    `json:"allowScaleChanging"`
-	InitialScale        *float32 `json:"initialScale"`
-	StartingWeapon      string   `json:"startingWeapon"`
-	RespawnWeapon       string   `json:"respawnWeapon"`
-	StartingAmmo        string   `json:"startingAmmo"`
-	RespawnAmmo         string   `json:"respawnAmmo"`
-	ConnectionMode      string   `json:"connectionMode"`
-	ModVersion          string   `json:"modVersion"`
+	Name           string `json:"name"`
+	HostName       string `json:"hostName"`
+	Map            string `json:"map"`
+	MaxPlayers     int    `json:"maxPlayers"`
+	HostPort       int    `json:"hostPort"`
+	ConnectionMode string `json:"connectionMode"`
+	ModVersion     string `json:"modVersion"`
 }
 
 type heartbeatRequest struct {
-	Name                *string  `json:"name"`
-	MaxPlayers          *int     `json:"maxPlayers"`
-	PVP                 *bool    `json:"pvp"`
-	CanGrab             *bool    `json:"canGrab"`
-	GrabOnlyUnconscious *bool    `json:"grabOnlyUnconscious"`
-	AllowRespawn        *bool    `json:"allowRespawn"`
-	RespawnTime         *int     `json:"respawnTime"`
-	RespawnAtStart      *bool    `json:"respawnAtStart"`
-	PlayerCollisions    *bool    `json:"playerCollisions"`
-	Cheats              *bool    `json:"cheats"`
-	AllowSwap           *bool    `json:"allowSwap"`
-	AllowScaleChanging  *bool    `json:"allowScaleChanging"`
-	InitialScale        *float32 `json:"initialScale"`
-	Players             int      `json:"players"`
-	Map                 string   `json:"map"`
-	BrutalMode          *bool    `json:"brutalMode"`
-	AllowObserver       *bool    `json:"allowObserver"`
-	Teams               *bool    `json:"teams"`
-	TeamsCfg            *string  `json:"teamsCfg"`
-	StartingWeapon      *string  `json:"startingWeapon"`
-	RespawnWeapon       *string  `json:"respawnWeapon"`
-	GunGame             *bool    `json:"gunGame"`
-	GGSequence          *string  `json:"ggSequence"`
-	GGOnDeath           *string  `json:"ggOnDeath"`
-	StartingAmmo        *string  `json:"startingAmmo"`
-	RespawnAmmo         *string  `json:"respawnAmmo"`
-	NumberOfLives       *int     `json:"numberOfLives"`
-	HealthFactor        *float32 `json:"healthFactor"`
-	RegenFactor         *float32 `json:"regenFactor"`
-	Blackout            *bool    `json:"blackout"`
-	RestrictLight       *bool    `json:"restrictLight"`
+	Name       *string `json:"name"`
+	MaxPlayers *int    `json:"maxPlayers"`
+	Players    int     `json:"players"`
+	Map        string  `json:"map"`
 }
 
 type joinRequest struct {
@@ -408,22 +412,13 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, list)
 	case http.MethodPost:
 		var in createRequest
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		metadata, err := decodeLobbyRequest(w, r, &in)
+		if err != nil {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
 		in.ModVersion = normalizeModVersion(in.ModVersion)
-		if in.HealthFactor == 0 {
-			in.HealthFactor = 1
-		}
-		if in.GGOnDeath == "" {
-			in.GGOnDeath = "Reset"
-		}
-		regenFactor := float32(1)
-		if in.RegenFactor != nil {
-			regenFactor = *in.RegenFactor
-		}
-		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || len(in.TeamsCfg) > 512 || len(in.StartingWeapon) > 512 || len(in.RespawnWeapon) > 512 || len(in.GGSequence) > 512 || len(in.StartingAmmo) > 64 || len(in.RespawnAmmo) > 64 || in.GGOnDeath != "Reset" && in.GGOnDeath != "Rollback" && in.GGOnDeath != "None" || in.MaxPlayers < 1 || in.MaxPlayers > 64 || in.HostPort < 1 || in.HostPort > 65535 || in.RespawnTime < 0 || in.RespawnTime > 3600 || in.NumberOfLives < 0 || in.NumberOfLives > 65535 || in.HealthFactor < 0.01 || in.HealthFactor > 10 || regenFactor < 0 || regenFactor > 10 || in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2.0) {
+		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || in.MaxPlayers < 1 || in.MaxPlayers > 64 || in.HostPort < 1 || in.HostPort > 65535 {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
@@ -435,38 +430,12 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 		}
 		l := &lobby{
 			ID: randomHex(16), Name: in.Name, HostName: normalizePlayerName(in.HostName), Map: in.Map,
-			MaxPlayers: in.MaxPlayers, Players: 1, PVP: in.PVP, GunGame: in.GunGame, GGSequence: in.GGSequence, GGOnDeath: in.GGOnDeath, CanGrab: in.CanGrab,
-			GrabOnlyUnconscious: in.CanGrab && in.GrabOnlyUnconscious,
-			AllowRespawn:        in.AllowRespawn, RespawnTime: in.RespawnTime, NumberOfLives: in.NumberOfLives, HealthFactor: in.HealthFactor, RegenFactor: regenFactor, Blackout: in.Blackout, RestrictLight: in.RestrictLight,
-			RespawnAtStart: in.RespawnAtStart, PlayerCollisions: true, Cheats: in.Cheats, BrutalMode: in.BrutalMode, AllowObserver: true, Teams: in.Teams, TeamsCfg: in.TeamsCfg, StartingWeapon: in.StartingWeapon, RespawnWeapon: in.RespawnWeapon, StartingAmmo: in.StartingAmmo, RespawnAmmo: in.RespawnAmmo,
+			MaxPlayers: in.MaxPlayers, Players: 1,
 			ConnectionMode: connectionMode, HostPort: in.HostPort, ModVersion: in.ModVersion,
 			UpdatedAt: time.Now(), HostKey: randomHex(16), HostPeer: 1, P2PKey: randomBytes(p2pKeySize),
 			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
 			usedPeerIDs: map[uint16]bool{1: true},
-		}
-		if in.PlayerCollisions != nil {
-			l.PlayerCollisions = *in.PlayerCollisions
-		}
-		if in.AllowObserver != nil {
-			l.AllowObserver = *in.AllowObserver
-		}
-		if in.AllowSwap != nil {
-			l.AllowSwap = in.AllowSwap
-		} else {
-			allowSwap := true
-			l.AllowSwap = &allowSwap
-		}
-		if in.AllowScaleChanging != nil {
-			l.AllowScaleChanging = in.AllowScaleChanging
-		} else {
-			allowScaleChanging := true
-			l.AllowScaleChanging = &allowScaleChanging
-		}
-		if in.InitialScale != nil {
-			l.InitialScale = in.InitialScale
-		} else {
-			initialScale := float32(1.0)
-			l.InitialScale = &initialScale
+			metadata:    metadata,
 		}
 		s.mu.Lock()
 		s.lobbies[l.ID] = l
@@ -618,109 +587,33 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		var in heartbeatRequest
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Players < 1 || in.Players > 64 || len(in.Map) > 64 {
+		metadata, err := decodeLobbyRequest(w, r, &in)
+		if err != nil || in.Players < 1 || in.Players > 64 || len(in.Map) > 64 {
 			fail(w, 400, "invalid player count")
 			return
 		}
 		if in.Name != nil && (len(*in.Name) < 1 || len(*in.Name) > 48) ||
-			in.MaxPlayers != nil && (*in.MaxPlayers < 1 || *in.MaxPlayers > 64) ||
-			in.RespawnTime != nil && (*in.RespawnTime < 0 || *in.RespawnTime > 3600) ||
-			in.InitialScale != nil && (*in.InitialScale < 0.25 || *in.InitialScale > 2) {
+			in.MaxPlayers != nil && (*in.MaxPlayers < 1 || *in.MaxPlayers > 64) {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
 		s.mu.Lock()
+		metadata, err = mergeLobbyMetadata(l.metadata, metadata)
+		if err != nil {
+			s.mu.Unlock()
+			fail(w, 400, "lobby metadata too large")
+			return
+		}
+		l.metadata = metadata
 		if in.Name != nil {
 			l.Name = *in.Name
 		}
 		if in.MaxPlayers != nil {
 			l.MaxPlayers = *in.MaxPlayers
 		}
-		if in.PVP != nil {
-			l.PVP = *in.PVP
-		}
-		if in.CanGrab != nil {
-			l.CanGrab = *in.CanGrab
-		}
-		if in.GrabOnlyUnconscious != nil {
-			l.GrabOnlyUnconscious = *in.GrabOnlyUnconscious
-		}
-		l.GrabOnlyUnconscious = l.CanGrab && l.GrabOnlyUnconscious
-		if in.AllowRespawn != nil {
-			l.AllowRespawn = *in.AllowRespawn
-		}
-		if in.RespawnTime != nil {
-			l.RespawnTime = *in.RespawnTime
-		}
-		if in.RespawnAtStart != nil {
-			l.RespawnAtStart = *in.RespawnAtStart
-		}
-		if in.PlayerCollisions != nil {
-			l.PlayerCollisions = *in.PlayerCollisions
-		}
-		if in.Cheats != nil {
-			l.Cheats = *in.Cheats
-		}
-		if in.AllowSwap != nil {
-			l.AllowSwap = in.AllowSwap
-		}
-		if in.AllowScaleChanging != nil {
-			l.AllowScaleChanging = in.AllowScaleChanging
-		}
-		if in.InitialScale != nil {
-			l.InitialScale = in.InitialScale
-		}
 		l.Players = in.Players
 		if in.Map != "" {
 			l.Map = in.Map
-		}
-		if in.BrutalMode != nil {
-			l.BrutalMode = *in.BrutalMode
-		}
-		if in.AllowObserver != nil {
-			l.AllowObserver = *in.AllowObserver
-		}
-		if in.Teams != nil {
-			l.Teams = *in.Teams
-		}
-		if in.TeamsCfg != nil && len(*in.TeamsCfg) <= 512 {
-			l.TeamsCfg = *in.TeamsCfg
-		}
-		if in.StartingWeapon != nil && len(*in.StartingWeapon) <= 512 {
-			l.StartingWeapon = *in.StartingWeapon
-		}
-		if in.RespawnWeapon != nil && len(*in.RespawnWeapon) <= 512 {
-			l.RespawnWeapon = *in.RespawnWeapon
-		}
-		if in.GunGame != nil {
-			l.GunGame = *in.GunGame
-		}
-		if in.GGSequence != nil && len(*in.GGSequence) <= 512 {
-			l.GGSequence = *in.GGSequence
-		}
-		if in.GGOnDeath != nil && (*in.GGOnDeath == "Reset" || *in.GGOnDeath == "Rollback" || *in.GGOnDeath == "None") {
-			l.GGOnDeath = *in.GGOnDeath
-		}
-		if in.StartingAmmo != nil && len(*in.StartingAmmo) <= 64 {
-			l.StartingAmmo = *in.StartingAmmo
-		}
-		if in.RespawnAmmo != nil && len(*in.RespawnAmmo) <= 64 {
-			l.RespawnAmmo = *in.RespawnAmmo
-		}
-		if in.NumberOfLives != nil && *in.NumberOfLives >= 0 && *in.NumberOfLives <= 65535 {
-			l.NumberOfLives = *in.NumberOfLives
-		}
-		if in.HealthFactor != nil && *in.HealthFactor >= 0.01 && *in.HealthFactor <= 10 {
-			l.HealthFactor = *in.HealthFactor
-		}
-		if in.RegenFactor != nil && *in.RegenFactor >= 0 && *in.RegenFactor <= 10 {
-			l.RegenFactor = *in.RegenFactor
-		}
-		if in.Blackout != nil {
-			l.Blackout = *in.Blackout
-		}
-		if in.RestrictLight != nil {
-			l.RestrictLight = *in.RestrictLight
 		}
 		l.UpdatedAt = time.Now()
 		s.mu.Unlock()
