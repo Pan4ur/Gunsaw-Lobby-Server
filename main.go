@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -43,26 +45,29 @@ const (
 var udpMagic = []byte{'G', 'U', 'D', 'P'}
 
 type lobby struct {
-	ID             string       `json:"id"`
-	Name           string       `json:"name"`
-	HostName       string       `json:"hostName"`
-	Map            string       `json:"map"`
-	MaxPlayers     int          `json:"maxPlayers"`
-	Players        int          `json:"players"`
-	ConnectionMode string       `json:"connectionMode"`
-	HostPort       int          `json:"hostPort"`
-	HostIP         string       `json:"hostIp"`
-	ModVersion     string       `json:"modVersion"`
-	UpdatedAt      time.Time    `json:"-"`
-	HostKey        string       `json:"-"`
-	HostPeer       uint16       `json:"-"`
-	HostAddr       *net.UDPAddr `json:"-"`
-	peers          map[string]peer
-	bannedIPs      map[string]time.Time
-	usedPeerIDs    map[uint16]bool
-	HostP2P        bool
-	P2PKey         []byte `json:"-"`
-	metadata       map[string]json.RawMessage
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	HostName         string            `json:"hostName"`
+	Map              string            `json:"map"`
+	MaxPlayers       int               `json:"maxPlayers"`
+	Players          int               `json:"players"`
+	ConnectionMode   string            `json:"connectionMode"`
+	HostPort         int               `json:"hostPort"`
+	HostIP           string            `json:"hostIp"`
+	ModVersion       string            `json:"modVersion"`
+	HasPassword      bool              `json:"hasPassword"`
+	Password         [sha256.Size]byte `json:"-"`
+	UpdatedAt        time.Time         `json:"-"`
+	HostKey          string            `json:"-"`
+	HostPeer         uint16            `json:"-"`
+	HostAddr         *net.UDPAddr      `json:"-"`
+	peers            map[string]peer
+	bannedIPs        map[string]time.Time
+	passwordAttempts map[string]int
+	usedPeerIDs      map[uint16]bool
+	HostP2P          bool
+	P2PKey           []byte `json:"-"`
+	metadata         map[string]json.RawMessage
 }
 
 var reservedLobbyFields = func() map[string]bool {
@@ -187,6 +192,7 @@ type store struct {
 }
 
 type createRequest struct {
+	Password       string `json:"password"`
 	Name           string `json:"name"`
 	HostName       string `json:"hostName"`
 	Map            string `json:"map"`
@@ -197,6 +203,7 @@ type createRequest struct {
 }
 
 type heartbeatRequest struct {
+	Password   *string `json:"password"`
 	Name       *string `json:"name"`
 	MaxPlayers *int    `json:"maxPlayers"`
 	Players    int     `json:"players"`
@@ -204,6 +211,7 @@ type heartbeatRequest struct {
 }
 
 type joinRequest struct {
+	Password   string `json:"password"`
 	PlayerName string `json:"playerName"`
 	ModVersion string `json:"modVersion"`
 }
@@ -325,7 +333,14 @@ func requestIP(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	return host
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+func passwordDigest(lobbyID, password string) [sha256.Size]byte {
+	return sha256.Sum256([]byte(lobbyID + "\x00" + password))
 }
 
 func udpIP(addr *net.UDPAddr) string {
@@ -390,13 +405,15 @@ func main() {
 	go runUDPRelay(s, *udpAddress)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]string{"status": "ok", "protocol": protocolVersion})
-	})
+	mux.HandleFunc("/healthz", handleHealth)
 	mux.HandleFunc("/v1/lobbies", s.handleLobbies)
 	mux.HandleFunc("/v1/lobbies/", s.handleLobby)
 	log.Printf("HTTP lobby directory listening on %s; UDP relay on %s; public relay %s", *httpAddress, *udpAddress, *relayPublicAddress)
 	log.Fatal(http.ListenAndServe(*httpAddress, mux))
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"status": "ok", "protocol": protocolVersion, "lobbyPasswords": true})
 }
 
 func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
@@ -418,7 +435,7 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.ModVersion = normalizeModVersion(in.ModVersion)
-		if len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || in.MaxPlayers < 1 || in.MaxPlayers > 64 || in.HostPort < 1 || in.HostPort > 65535 {
+		if len(in.Password) > 512 || len(in.Name) < 1 || len(in.Name) > 48 || len(in.HostName) > 32 || len(in.Map) > 64 || len(in.ModVersion) > 32 || in.MaxPlayers < 1 || in.MaxPlayers > 64 || in.HostPort < 1 || in.HostPort > 65535 {
 			fail(w, 400, "invalid lobby fields")
 			return
 		}
@@ -436,7 +453,9 @@ func (s *store) handleLobbies(w http.ResponseWriter, r *http.Request) {
 			peers: make(map[string]peer), bannedIPs: make(map[string]time.Time),
 			usedPeerIDs: map[uint16]bool{1: true},
 			metadata:    metadata,
+			HasPassword: in.Password != "", passwordAttempts: make(map[string]int),
 		}
+		l.Password = passwordDigest(l.ID, in.Password)
 		s.mu.Lock()
 		s.lobbies[l.ID] = l
 		s.mu.Unlock()
@@ -465,7 +484,7 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 && parts[1] == "join" && r.Method == http.MethodPost {
 		var in joinRequest
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLobbyMetadata)).Decode(&in); err != nil || len(in.Password) > 512 {
 			fail(w, 400, "invalid join request")
 			return
 		}
@@ -483,6 +502,35 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 			fail(w, 403, "you are temporarily banned from this lobby")
 			return
 		}
+		if l.HasPassword {
+			if ip == "" {
+				s.mu.Unlock()
+				fail(w, 400, "invalid client address")
+				return
+			}
+			digest := passwordDigest(l.ID, in.Password)
+			if subtle.ConstantTimeCompare(l.Password[:], digest[:]) != 1 {
+				if l.passwordAttempts == nil {
+					l.passwordAttempts = make(map[string]int)
+				}
+				l.passwordAttempts[ip]++
+				remaining := 5 - l.passwordAttempts[ip]
+				if remaining <= 0 {
+					if l.bannedIPs == nil {
+						l.bannedIPs = make(map[string]time.Time)
+					}
+					l.bannedIPs[ip] = time.Now().Add(time.Hour)
+					delete(l.passwordAttempts, ip)
+					s.mu.Unlock()
+					fail(w, 403, "Too many incorrect passwords. You are banned from this lobby for 1 hour.")
+					return
+				}
+				s.mu.Unlock()
+				fail(w, 401, "Incorrect password. "+strconv.Itoa(remaining)+" attempts remaining.")
+				return
+			}
+		}
+		delete(l.passwordAttempts, ip)
 		if playerNameTakenLocked(l, playerName) {
 			s.mu.Unlock()
 			fail(w, 409, "a player with this name is already in the lobby")
@@ -592,7 +640,7 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "invalid player count")
 			return
 		}
-		if in.Name != nil && (len(*in.Name) < 1 || len(*in.Name) > 48) ||
+		if in.Password != nil && len(*in.Password) > 512 || in.Name != nil && (len(*in.Name) < 1 || len(*in.Name) > 48) ||
 			in.MaxPlayers != nil && (*in.MaxPlayers < 1 || *in.MaxPlayers > 64) {
 			fail(w, 400, "invalid lobby fields")
 			return
@@ -605,6 +653,10 @@ func (s *store) handleLobby(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		l.metadata = metadata
+		if in.Password != nil {
+			l.HasPassword = *in.Password != ""
+			l.Password = passwordDigest(l.ID, *in.Password)
+		}
 		if in.Name != nil {
 			l.Name = *in.Name
 		}
